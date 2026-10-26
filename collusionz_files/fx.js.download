@@ -1,0 +1,284 @@
+/* fx.js — site-wide ambience: cursor glow, scroll parallax + reveal.
+   Loaded in <head> (defer) so it can register permanent listeners through
+   nav.js. All fixed layers live on <html>, not <body>, so soft navigations
+   (which only swap body content) never destroy them.
+   Respects prefers-reduced-motion. */
+(function () {
+  'use strict';
+  if (window.__fxLoaded) return;
+  window.__fxLoaded = true;
+
+  var root = document.documentElement;
+  var reduced = false;
+  try { reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) {}
+
+  function perm(t, type, fn) {
+    if (window.__navPermEventListener) return window.__navPermEventListener(t, type, fn);
+    return t.addEventListener(type, fn);
+  }
+
+  /* ---------- tiny on-demand style sheet (survives swaps: lives in head) ---------- */
+  var css =
+    '#fxGlow{position:fixed;top:0;left:0;width:360px;height:360px;border-radius:50%;pointer-events:none;z-index:45;' +
+    'mix-blend-mode:screen;background:radial-gradient(circle,rgba(85,115,244,0.22) 0%,rgba(71,100,236,0.10) 40%,transparent 72%);' +
+    'transform:translate(-50%,-50%);transition:transform .3s ease,opacity .3s ease;will-change:left,top}' +
+    '#fxGlow.fx-hot{transform:translate(-50%,-50%) scale(1.7)}' +
+    'main.nav-enter{animation:navEnter .5s ease}@keyframes navEnter{from{opacity:0;transform:translateY(14px) scale(.995)}to{opacity:1;transform:none}}' +
+    '@media(prefers-reduced-motion:reduce){main.nav-enter{animation:none}}';
+  if (reduced) {
+    css += '[data-fx-reveal]{opacity:1;transform:none}';
+  } else {
+    css +=
+      '[data-fx-reveal]{opacity:0;transform:translate(var(--fx-x,0px),var(--fx-y,26px)) var(--fx-s,scale(1));transition:opacity .7s ease,transform .7s ease}' +
+      '[data-fx-reveal].fx-in{opacity:1;transform:none}' +
+      '@media(prefers-reduced-motion:reduce){[data-fx-reveal]{opacity:1;transform:none;transition:none}}';
+  }
+
+  /* ---------- click burst + button press (modelled on akryst.moe) ----------
+     Their look: an expanding ring (scale .25 -> 3.4) plus a radial spray of
+     particles, and controls that squish to .95/.94 while held down. */
+  css +=
+    '@keyframes fxRing{0%{opacity:.95;transform:translate(-50%,-50%) scale(.25)}to{opacity:0;transform:translate(-50%,-50%) scale(3.4)}}' +
+    '@keyframes fxPart{0%{opacity:1;transform:rotate(var(--fx-a)) translateY(0) scale(1)}to{opacity:0;transform:rotate(var(--fx-a)) translateY(-28px) scale(.15)}}' +
+    '.fx-ring{position:fixed;width:22px;height:22px;border-radius:50%;border:2px solid rgba(255,255,255,.7);pointer-events:none;z-index:9700;animation:fxRing .5s cubic-bezier(.2,.65,.3,1) forwards;will-change:transform,opacity}' +
+    '.fx-part{position:fixed;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:50%;background:rgba(255,255,255,.92);pointer-events:none;z-index:9700;animation:fxPart .5s ease-out forwards;will-change:transform,opacity}' +
+    'button{transition-property:transform;transition-duration:.14s;transition-timing-function:ease}' +
+    'button:active:not(:disabled):not([style*="transform"]),[role="button"]:active,.btn:active,.chip:active{transform:scale(.94) !important}' +
+    'button.lightbox-close:active:not(:disabled),button.lb-nav:active:not(:disabled){transform:scale(.9) !important}' +
+    '@media(prefers-reduced-motion:reduce){.fx-ring,.fx-part{display:none}}';
+
+  var sheet = document.createElement('style');
+  sheet.id = 'fxStyle';
+  sheet.textContent = css;
+  document.head.appendChild(sheet);
+
+  /* ================= CURSOR GLOW ================= */
+  var glow = document.createElement('div');
+  glow.id = 'fxGlow';
+  root.appendChild(glow);
+
+  var gx = -200, gy = -200, tx = -200, ty = -200;
+  var INTERACTIVE = 'a,button,[role="button"],input,textarea,select,label,[data-gb-post],[data-gb-more]';
+
+  perm(window, 'pointermove', function (e) {
+    tx = e.clientX;
+    ty = e.clientY;
+    var t = e.target;
+    var hot = t && t.closest && t.closest(INTERACTIVE);
+    if (hot) {
+      glow.classList.add('fx-hot');
+    } else {
+      glow.classList.remove('fx-hot');
+    }
+  }, undefined);
+
+  // Hide entirely for coarse pointers (touch).
+  try {
+    if (window.matchMedia('(pointer:coarse)').matches) glow.style.display = 'none';
+  } catch (e) {}
+
+  /* ================= SCROLL: PARALLAX + REVEAL ================= */
+  // Directional reveal: data-fx-reveal="up|down|left|right|zoom"
+  // Optional data-fx-delay="150" (ms). Wrap children in data-fx-stagger to
+  // auto-stagger them by index.
+  var DIR = {
+    up:    [0,   '26px'],
+    down:  [0,   '-26px'],
+    left:  ['26px',  0],
+    right: ['-26px', 0],
+    zoom:  ['0px', '0px']
+  };
+  function applyRevealStyles(el) {
+    try {
+      var dir = (el.getAttribute('data-fx-reveal') || 'up').toLowerCase();
+      var d = DIR[dir] || DIR.up;
+      var zoom = (dir === 'zoom') ? 'scale(0.92)' : 'scale(1)';
+      el.style.setProperty('--fx-x', d[0]);
+      el.style.setProperty('--fx-y', d[1]);
+      el.style.setProperty('--fx-s', zoom);
+      var del = parseFloat(el.getAttribute('data-fx-delay')) || 0;
+      if (del) el.style.transitionDelay = del + 'ms';
+    } catch (e) {}
+  }
+  function applyStagger(container) {
+    var kids = container.children;
+    var base = parseFloat(container.getAttribute('data-fx-stagger')) || 60;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (!k.hasAttribute('data-fx-reveal')) continue;
+      try { k.style.transitionDelay = (i * base) + 'ms'; } catch (e) {}
+    }
+  }
+  var parallaxEls = [];
+  var revealObs = null;
+  function collectFx() {
+    parallaxEls = [];
+    var pl = root.querySelectorAll('[data-fx-parallax]');
+    for (var i = 0; i < pl.length; i++) {
+      parallaxEls.push({
+        el: pl[i],
+        sp: parseFloat(pl[i].getAttribute('data-fx-parallax')) || 0.25
+      });
+    }
+    // stagger containers first so child delays attach before observers run
+    var st = root.querySelectorAll('[data-fx-stagger]');
+    for (var s = 0; s < st.length; s++) applyStagger(st[s]);
+    if (reduced) return;
+    if (!('IntersectionObserver' in window)) return;
+    if (!revealObs) {
+      revealObs = new IntersectionObserver(function (entries) {
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i].isIntersecting) {
+            entries[i].target.classList.add('fx-in');
+            revealObs.unobserve(entries[i].target);
+          }
+        }
+      }, { threshold: 0.1 });
+    }
+    var rv = root.querySelectorAll('[data-fx-reveal]');
+    for (var j = 0; j < rv.length; j++) {
+      applyRevealStyles(rv[j]);
+      revealObs.observe(rv[j]);
+    }
+  }
+  collectFx();
+
+  // After a soft navigation the freshly swapped body brings new fx elements;
+  // rescan shortly after any body mutation (rAF-debounced, so nav.js's visit
+  // cleanup can never leave a stale timeout behind).
+  var observer = null;
+  var rescanned = false;
+  function scheduleRescan() {
+    if (rescanned) return;
+    rescanned = true;
+    requestAnimationFrame(function () {
+      rescanned = false;
+      collectFx();
+    });
+  }
+  if (typeof MutationObserver === 'function') {
+    observer = new MutationObserver(scheduleRescan);
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
+
+  /* ================= MASTER FRAME LOOP ================= */
+  if (!reduced) {
+    var last = performance.now();
+    (function frame(now) {
+      var dt = Math.min(64, now - last);
+      last = now;
+      var s = dt / 16.667;
+
+      // -- glow easing
+      gx += (tx - gx) * 0.18 * s;
+      gy += (ty - gy) * 0.18 * s;
+      if (gx > -100) { glow.style.left = gx + 'px'; glow.style.top = gy + 'px'; }
+
+      // -- parallax
+      var py = window.scrollY;
+      for (var k = 0; k < parallaxEls.length; k++) {
+        parallaxEls[k].el.style.transform = 'translateY(' + (py * -parallaxEls[k].sp) + 'px)';
+      }
+
+      requestAnimationFrame(frame);
+    })(last);
+  } else {
+    // Reduced motion: reveal everything, keep effect layers inert.
+    var rvAll = root.querySelectorAll('[data-fx-reveal]');
+    for (var ri = 0; ri < rvAll.length; ri++) rvAll[ri].classList.add('fx-in');
+  }
+
+  /* ================= CLICK BURST =================
+     Ring + particle spray at the pointer. Layers live on <html> so a soft
+     navigation can't orphan them; each node removes itself after its run. */
+  if (!reduced) {
+    var FX_PARTS = 8;
+    perm(document, 'pointerdown', function (e) {
+      if (e.button !== 0) return;
+      var x = e.clientX, y = e.clientY;
+      if (!x && !y) return;
+
+      var ring = document.createElement('div');
+      ring.className = 'fx-ring';
+      ring.style.left = x + 'px';
+      ring.style.top = y + 'px';
+      root.appendChild(ring);
+      setTimeout(function () { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 560);
+
+      for (var i = 0; i < FX_PARTS; i++) {
+        var p = document.createElement('div');
+        p.className = 'fx-part';
+        p.style.left = x + 'px';
+        p.style.top = y + 'px';
+        p.style.setProperty('--fx-a', (i * (360 / FX_PARTS) + (Math.random() * 20 - 10)) + 'deg');
+        p.style.animationDelay = (Math.random() * 50) + 'ms';
+        root.appendChild(p);
+        (function (el) {
+          setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 620);
+        })(p);
+      }
+    });
+  }
+
+  /* ================= PRESS SOUND =================
+     The click sample akryst.moe uses on every button press (their /sfx/tac.mp3),
+     hotlinked — cross-origin <audio> playback needs no CORS. If their host ever
+     refuses or is unreachable, we fall back to a short synthesized tick so a
+     press always makes a sound. */
+  var pressSound = (function () {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ctx = null;
+    var el = null;
+    var elBroken = false;
+
+    try {
+      el = new Audio('https://akryst.moe/sfx/tac.mp3');
+      el.preload = 'auto';
+      el.volume = 0.3;
+      el.addEventListener('error', function () { elBroken = true; });
+    } catch (e) { elBroken = true; }
+
+    function synth() {
+      try {
+        if (!AC) return;
+        if (!ctx) ctx = new AC();
+        if (ctx.state === 'suspended') ctx.resume().catch(function () {});
+        var t = ctx.currentTime;
+        var o = ctx.createOscillator();
+        var g = ctx.createGain();
+        o.type = 'square';
+        o.frequency.setValueAtTime(1150, t);
+        o.frequency.exponentialRampToValueAtTime(520, t + 0.06);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.14, t + 0.006);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start(t);
+        o.stop(t + 0.1);
+      } catch (e) {}
+    }
+
+    return function () {
+      if (el && !elBroken) {
+        try {
+          el.currentTime = 0;
+          var p = el.play();
+          // Transient rejection (buffer not ready): tick this once, but only a
+          // real 'error' event is allowed to retire the sample for good.
+          if (p && p.catch) p.catch(function () { synth(); });
+          return;
+        } catch (e) {}
+      }
+      synth();
+    };
+  })();
+
+  var SND_SEL = 'a,button,[role="button"],.chip,.gallery-card,label,[data-gb-post],[data-gb-more],[data-gb-like]';
+  perm(document, 'pointerdown', function (e) {
+    if (e.button !== 0) return;
+    var t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest(SND_SEL)) pressSound();
+  }, undefined);
+})();

@@ -1,0 +1,241 @@
+/* Site-wide music player — no visible UI. One song keeps playing across all
+   pages via soft navigation (nav.js). A fresh Audio element is only created on
+   a real page load (window.__hz is missing); soft navigations reuse the same
+   element so audio never restarts. Per-visit hooks are re-registered on every
+   run so nav.js's visit cleanup stays correct.
+   Enter overlay appears on every hard page load until entered, so direct links
+   like /gallery gate too. Soft navigation never re-shows it. */
+(function () {
+  'use strict';
+
+  var TRACKS = [
+    { src: '/audio/song-1.mp3', title: 'untitled', artist: 'song 1' },
+    { src: '/audio/song-2.mp3', title: 'untitled', artist: 'song 2' },
+    { src: '/audio/mystery-of-love.mp3', title: 'Mystery of Love', artist: 'Sufjan Stevens' },
+    { src: '/audio/you-are-the-sun.mp3', title: 'You Are the Sun in My Life' }
+  ];
+
+  var core = window.__hz;
+  var first = !core;
+
+  if (first) {
+    core = window.__hz = {};
+
+    // Enter overlay shows on every hard page load until the visitor has
+    // entered once in this tab. Soft navigation never re-shows it.
+    core.showEnter = true;
+
+    core.entered = false;
+    try { core.entered = sessionStorage.getItem('hzUnlocked') === '1'; } catch (e) {}
+
+    core.order = TRACKS.map(function (_, i) { return i; });
+    (function shuffle(a) {
+      for (var i = a.length - 1; i > 0; i--) {
+        var j = Math.floor(Math.random() * (i + 1));
+        var t = a[i]; a[i] = a[j]; a[j] = t;
+      }
+    })(core.order);
+
+    core.cur = -1;
+    core.resumeT = 0;
+    var resume = null;
+    try { resume = JSON.parse(sessionStorage.getItem('hzPlayer') || 'null'); } catch (e) {}
+    if (resume && typeof resume.i === 'number' && resume.i >= 0 && resume.i < TRACKS.length) {
+      core.cur = resume.i;
+      if (typeof resume.t === 'number' && resume.t > 0) core.resumeT = resume.t;
+    }
+
+    var audio = new Audio();
+    audio.preload = 'auto';
+    audio.loop = false;
+    try {
+      var v = parseFloat(localStorage.getItem('hzVol'));
+      if (isFinite(v) && v >= 0 && v <= 1) audio.volume = v;
+      else audio.volume = 0.5;
+    } catch (e) { audio.volume = 0.5; }
+    core.audio = audio;
+
+    core.markUnlocked = function () {
+      core.entered = true;
+      try { sessionStorage.setItem('hzUnlocked', '1'); } catch (e) {}
+    };
+
+    core.save = function () {
+      try { sessionStorage.setItem('hzPlayer', JSON.stringify({ i: core.cur, t: Math.floor(core.audio.currentTime || 0) })); } catch (e) {}
+    };
+
+    core.next = function () {
+      if (core.order.length < 2) return;
+      if (core.cur < 0) core.cur = core.order[0];
+      var n = core.order[Math.floor(Math.random() * core.order.length)];
+      while (n === core.cur) n = core.order[Math.floor(Math.random() * core.order.length)];
+      core.cur = n;
+      var t = TRACKS[n];
+      audio.src = t.src;
+      audio.load();
+      audio.play().catch(function () {});
+    };
+
+    /* ---------- tap gate: the track is held (position 0 or the saved resume
+       point) until the visitor's very first gesture. Nothing ever autoplays,
+       so a song can no longer be "already 1 min in" by the time they tap. */
+    core.started = false;
+
+    core.beginPlay = function () {
+      if (core.started) return;
+      core.started = true;
+      ['pointerdown', 'keydown', 'touchstart'].forEach(function (t) {
+        document.removeEventListener(t, core.beginPlay, { passive: true });
+      });
+      core.audio.muted = false;
+      core.audio.play().then(function () {}).catch(function () {});
+      core.markUnlocked();
+    };
+
+    core.unlockSound = core.beginPlay;   // enter overlay / legacy callers
+
+    // Called on every hard load and re-called after each soft navigation
+    // (nav.js drops per-visit listeners on swap), so the gate always survives.
+    core.armTap = function () {
+      if (core.started) return;
+      ['pointerdown', 'keydown', 'touchstart'].forEach(function (t) {
+        document.addEventListener(t, core.beginPlay, { passive: true });
+      });
+    };
+
+    // Soft re-run: keep an already-started song going, otherwise stay silent
+    // and wait for the first tap.
+    core.startAuto = function () {
+      if (core.started) {
+        audio.muted = false;
+        audio.play().then(function () {}).catch(function () {});
+        return;
+      }
+      core.armTap();
+    };
+
+    function bgVideos() {
+      return document.querySelectorAll('#bgVideo, #bgVideoOther, video.bg-video');
+    }
+
+    function playBg() {
+      bgVideos().forEach(function (v) {
+        var op = parseFloat(getComputedStyle(v).opacity || '0');
+        if (op > 0) { try { var p = v.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {} }
+      });
+    }
+
+    core.buildEnter = function () {
+      if (document.getElementById('hzEnter')) return;
+
+      var o = document.createElement('div');
+      o.id = 'hzEnter';
+      o.setAttribute('role', 'button');
+      o.setAttribute('tabindex', '0');
+      o.setAttribute('aria-label', 'enter');
+      o.style.cssText =
+        'position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;cursor:pointer;' +
+        'background:rgba(0,0,0,0.55);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);' +
+        'transition:opacity .6s ease;color:#fff;font-family:"Satoshi",sans-serif;user-select:none;overflow:hidden;' +
+        'outline:none;border:0;-webkit-tap-highlight-color:transparent';
+      o.innerHTML =
+        '<div style="display:flex;flex-direction:column;align-items:center;text-align:center;transition:transform .6s ease,opacity .6s ease">' +
+          '<img src="/assets/img/avatar.jpg" alt="" style="width:104px;height:104px;border-radius:50%;object-fit:cover;margin-bottom:18px">' +
+          '<div style="font-size:2.25rem;font-weight:500;line-height:1.2">press</div>' +
+          '<div style="font-size:1rem;color:rgba(255,255,255,0.75);margin-top:6px">to enter</div>' +
+        '</div>';
+      document.body.appendChild(o);
+
+      bgVideos().forEach(function (v) { try { v.pause(); } catch (e) {} });
+
+      function blockScroll(e) {
+        if (document.getElementById('hzEnter')) e.preventDefault();
+      }
+      window.addEventListener('wheel', blockScroll, { passive: false });
+      window.addEventListener('touchmove', blockScroll, { passive: false });
+
+      var done = false;
+      function go() {
+        if (done) return;
+        done = true;
+        window.removeEventListener('wheel', blockScroll);
+        window.removeEventListener('touchmove', blockScroll);
+        var inner = o.firstElementChild;
+        if (inner) { inner.style.transform = 'scale(1.06)'; inner.style.opacity = '0'; }
+        o.style.opacity = '0';
+        o.style.pointerEvents = 'none';
+        setTimeout(function () { if (o.parentNode) o.parentNode.removeChild(o); }, 650);
+        core.markUnlocked();
+        core.unlockSound();
+        playBg();
+      }
+
+      o.addEventListener('click', go);
+      o.addEventListener('pointerdown', go);
+      o.addEventListener('touchstart', go, { passive: true });
+      o.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Escape') { e.preventDefault(); go(); return; }
+        if (e.key.indexOf('Arrow') === 0 || e.key === 'PageUp' || e.key === 'PageDown' || e.key === 'Home' || e.key === 'End') e.preventDefault();
+      });
+      try { o.focus(); } catch (e) {}
+    };
+
+    // The enter gate only exists when arriving from outside AND not already
+    // unlocked this session; either way playback still waits for a tap.
+    function startHere() {
+      if (core.showEnter && !core.entered) {
+        core.buildEnter();
+      }
+      core.armTap();
+    }
+
+    function loadFresh() {
+      if (core.cur < 0) core.cur = core.order[0];
+      audio.src = TRACKS[core.cur].src;
+      audio.load();
+      startHere();
+    }
+
+    // Resume mid-track unless we're near the end of it.
+    if (core.cur >= 0 && core.resumeT > 0) {
+      var rt = TRACKS[core.cur];
+      var cl = new Audio();
+      cl.preload = 'metadata';
+      cl.addEventListener('loadedmetadata', function () {
+        if (core.resumeT < cl.duration - 5) {
+          audio.src = rt.src;
+          audio.load();
+          audio.currentTime = core.resumeT;
+          startHere();
+        } else {
+          loadFresh();
+        }
+      });
+      cl.src = rt.src;
+    } else {
+      loadFresh();
+    }
+  }
+
+  /* ---------- per-visit hooks (nav.js cleans before each swap, this runs
+  again after every soft mount so they stay registered and unique) ---------- */
+  var audio = core.audio;
+
+  audio.addEventListener('ended', core.next);
+  audio.addEventListener('timeupdate', core.save);
+  audio.addEventListener('volumechange', function () {
+    try { localStorage.setItem('hzVol', audio.volume); } catch (e) {}
+  });
+  window.addEventListener('pagehide', core.save);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') core.save();
+  });
+  setInterval(core.save, 2000);
+
+  // Soft re-run: audio element + track are already live, just keep it going.
+  // The enter gate is never rebuilt — it only exists on the first hard load.
+  if (!first) {
+    core.startAuto();
+  }
+})();
+
